@@ -17,10 +17,10 @@ pub async fn handle_event(event: Event, db: Arc<Database>, http: Arc<HttpClient>
             info!("Gateway connected! Logged in as: {}", ready.user.name);
         }
         Event::MessageCreate(msg) => {
-            // Ignore bot messages
-            if msg.author.bot {
-                return Ok(());
-            }
+            // Ignore bot messages (Temporarily disabled for load testing)
+            // if msg.author.bot {
+            //     return Ok(());
+            // }
 
             // 1. Antispam Rate Limit (Max 5 messages per 3 seconds)
             let mut rate_limiter = RateLimiter::new(db.redis.clone());
@@ -38,7 +38,81 @@ pub async fn handle_event(event: Event, db: Arc<Database>, http: Arc<HttpClient>
                     "User {} is spamming messages! Taking action...",
                     msg.author.id
                 );
-                // TODO: Apply timeout/mute via HTTP
+                
+                // 1a. Immediately delete the spam message
+                let _ = http.delete_message(msg.channel_id, msg.id).await;
+
+                // 1b. Purge recent messages from the spammer
+                let http_clone = http.clone();
+                let channel_id = msg.channel_id;
+                let author_id = msg.author.id;
+                tokio::spawn(async move {
+                    let mut last_message_id = None;
+                    let mut total_deleted = 0;
+
+                    // Scan up to 10 pages (1000 messages) to thoroughly scrub the spammer
+                    for _ in 0..10 {
+                        let mut messages_page = Vec::new();
+
+                        if let Some(id) = last_message_id {
+                            if let Ok(configured_req) = http_clone.channel_messages(channel_id).limit(100) {
+                                let req_before = configured_req.before(id);
+                                if let Ok(resp) = req_before.await {
+                                    messages_page = resp.model().await.unwrap_or_default();
+                                }
+                            }
+                        } else {
+                            if let Ok(configured_req) = http_clone.channel_messages(channel_id).limit(100) {
+                                if let Ok(resp) = configured_req.await {
+                                    messages_page = resp.model().await.unwrap_or_default();
+                                }
+                            }
+                        }
+
+                        if messages_page.is_empty() {
+                            break;
+                        }
+
+                        last_message_id = messages_page.last().map(|m| m.id);
+
+                        let to_delete: Vec<_> = messages_page
+                            .into_iter()
+                            .filter(|m| m.author.id == author_id)
+                            .map(|m| m.id)
+                            .collect();
+
+                        if to_delete.len() >= 2 {
+                            if let Ok(del_req) = http_clone.delete_messages(channel_id, &to_delete) {
+                                let _ = del_req.await;
+                                total_deleted += to_delete.len();
+                            }
+                        } else if to_delete.len() == 1 {
+                            let _ = http_clone.delete_message(channel_id, to_delete[0]).await;
+                            total_deleted += 1;
+                        }
+                    }
+                    
+                    if total_deleted > 0 {
+                        info!("Purged a total of {} messages from spammer {}", total_deleted, author_id);
+                    }
+                });
+
+                // 1c. Apply a 1-minute timeout to the spammer
+                if let Some(guild_id) = msg.guild_id {
+                    let timeout_until = SystemTime::now() + Duration::from_secs(60);
+                    let timestamp_secs =
+                        timeout_until.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+                    if let Ok(ts) = Timestamp::from_secs(timestamp_secs) {
+                        if let Ok(req) = http
+                            .update_guild_member(guild_id, msg.author.id)
+                            .communication_disabled_until(Some(ts))
+                        {
+                            let _ = req.await;
+                            info!("User {} timed out for 1 minute due to spamming.", msg.author.id);
+                        }
+                    }
+                }
+
                 return Ok(()); // Stop processing this message
             }
 
