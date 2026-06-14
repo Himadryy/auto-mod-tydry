@@ -32,7 +32,7 @@ impl OllamaClient {
     pub fn new() -> Result<Self> {
         let url = env::var("OLLAMA_URL").context("OLLAMA_URL must be set")?;
         let model = env::var("OLLAMA_MODEL").context("OLLAMA_MODEL must be set")?;
-        
+
         Ok(Self {
             client: Client::new(),
             url,
@@ -58,7 +58,8 @@ impl OllamaClient {
             stream: false,
         };
 
-        let res = self.client
+        let res = self
+            .client
             .post(format!("{}/api/generate", self.url))
             .json(&req_body)
             .send()
@@ -70,19 +71,25 @@ impl OllamaClient {
             anyhow::bail!("Ollama API error");
         }
 
-        let ollama_res: OllamaResponse = res.json().await.context("Failed to parse Ollama response")?;
-        
+        let ollama_res: OllamaResponse = res
+            .json()
+            .await
+            .context("Failed to parse Ollama response")?;
+
         info!("Raw Ollama Response: {}", ollama_res.response);
 
         // Deepseek might still wrap it in ```json ... ``` despite instructions, so we clean it.
-        let cleaned_json = ollama_res.response
+        let cleaned_json = ollama_res
+            .response
             .replace("```json", "")
             .replace("```", "")
             .trim()
             .to_string();
 
-        let decision: AiDecision = serde_json::from_str(&cleaned_json)
-            .context(format!("Failed to parse AI response into JSON. Raw: {}", cleaned_json))?;
+        let decision: AiDecision = serde_json::from_str(&cleaned_json).context(format!(
+            "Failed to parse AI response into JSON. Raw: {}",
+            cleaned_json
+        ))?;
 
         Ok(decision)
     }

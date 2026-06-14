@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
         // Spawn a new task to handle the event without blocking the main loop
         let _db_clone = Arc::clone(&db);
         let _http_clone = Arc::clone(&discord.http);
-        
+
         tokio::spawn(async move {
             if let Err(e) = events::handle_event(event, _db_clone, _http_clone).await {
                 error!("Error handling event: {:?}", e);
